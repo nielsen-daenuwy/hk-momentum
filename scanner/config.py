@@ -40,6 +40,8 @@ STOP_ATR = 1.5
 SWING_LOW_SESSIONS = 10
 SWING_MIN_ATR = 1.0               # ignore a swing low closer than this (noise would hit it)
 TARGET_R = 2.0
+MAX_RISK_PCT = 10                 # setups with a wider stop than this are not shown as picks
+EVENT_WINDOW = 7                  # flag results due within this many sessions
 HOLD_DAYS = {"Breakout": "3-7 days", "Pullback in Uptrend": "3-5 days", "Volume Ignition": "2-4 days"}
 
 # ---------------------------------------------------------------- 5. MARKET REGIME
@@ -56,5 +58,7 @@ DOWNLOAD_ROUNDS = 3               # retry rounds for tickers that came back empt
 MIN_COVERAGE = 0.85               # abort (keep the old results) if fewer names download
 EOD_READY = (16, 30)              # HKT; before this, today's unfinished bar is ignored
 SPARK_POINTS = 30
+EXTRA_CLOSED = ()                 # exceptional market closures, e.g. ("2027-03-01",)
+HOLIDAY_URL = "https://www.1823.gov.hk/common/ical/en.json"
 HKEX_LIST_URL = ("https://www.hkex.com.hk/eng/services/trading/securities/"
                  "securitieslists/ListOfSecurities.xlsx")

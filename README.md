@@ -2,7 +2,7 @@
 
 A free public page that ranks Hong Kong Main Board stocks for long-only swing trades held 2 to 7 days, using end-of-day data only.
 
-GitHub Actions runs the Python scan every weekday at 17:30 HKT and writes `site/data/latest.json`. The page in `site/` is plain
+GitHub Actions runs the Python scan on weekday evenings (first try 17:47 HKT, with later retries) and writes `site/data/latest.json`. The page in `site/` is plain
 HTML, CSS and JavaScript on GitHub Pages. The SCAN button loads that file. It does not fetch live prices.
 
 To put it online, follow [DEPLOY.md](DEPLOY.md).
@@ -22,6 +22,9 @@ republishes by itself.
 | Change the RSI band or penalties | `RSI_LOW`, `RSI_HIGH`, `RSI_PENALTY_*`, `OVEREXT_*` |
 | Change stops and targets | `STOP_ATR`, `SWING_LOW_SESSIONS`, `TARGET_R` |
 | Show more or fewer picks | `PICKS` |
+| Allow wider or tighter stops | `MAX_RISK_PCT` |
+| Flag results further ahead | `EVENT_WINDOW` |
+| Record an exceptional market closure | `EXTRA_CLOSED` |
 | Change the regime rules | `HSI_MA`, `BREADTH_ON`, `BREADTH_OFF` |
 
 ## Liquidity filter
@@ -66,6 +69,16 @@ Only stocks with a setup appear as picks. The first match wins.
 **Stop:** the 10-day swing low when it is 1 to 1.5 ATR below the entry, otherwise 1.5 ATR. **Target:** 2R. Risk is measured from the
 top of the entry zone, so a worse fill than that breaks the 2R. Prices are rounded to HKEX tick sizes.
 
+**Order:** "Buy above X" means do nothing unless price breaks up to X. "Buy X – Y" is a zone around the current price.
+
+**Wide stops:** a setup whose stop is more than 10% below the entry is not shown as a pick. The page names the ones it left out.
+
+## Results warnings
+
+A pick is flagged when results are due within 7 sessions. The dates come from Yahoo and from [`events.csv`](events.csv),
+which you can edit on GitHub (`code,date,note`, one per line, date as `2026-11-30`). **Neither source is complete.** In a spot
+check Yahoo knew 2 of 3 announced meeting dates. Always open the News link before buying.
+
 ## Market regime
 
 - **Risk-On** (20 picks): HSI above its 50-day average and at least 50% of liquid stocks above their 20-day average
@@ -76,11 +89,14 @@ top of the entry zone, so a worse fill than that breaks the 2R. Prices are round
 
 | Problem | What happens |
 |---|---|
-| Holiday or typhoon | No new session is found, so the last trading day stays up with its date |
+| Holiday | Not expected as a session (government holiday list), so nothing is flagged |
+| Typhoon or black rainstorm | The market stays open, so a session is expected as usual |
+| Latest session missing or mostly missing | Newest available prices are published, the run is marked failed, the page shows OUT OF DATE, and later runs try again |
+| Index has no close for that session | The scan stops and the previous results stay |
 | Some downloads fail | Retried 3 times. Under 85% coverage the scan stops and the old results stay |
-| HKEX list or market caps unavailable | The saved copy in `cache/` is used and the page says so |
-| The whole scan fails | Tried 3 times, 5 minutes apart. The page keeps the last good scan and shows a notice |
-| The page cannot load the data | A message and a working SCAN button |
+| A rerun gets thinner data for the same day | The published results are kept |
+| HKEX list, market caps or holidays unavailable | The saved copy in `cache/` is used and the page says so |
+| Website deploy fails | Tried again after 90 seconds, and by the next scheduled run |
 
 ## Known limits
 
@@ -88,7 +104,11 @@ top of the entry zone, so a worse fill than that breaks the 2R. Prices are round
   leaves that stock out.
 - Market cap is Yahoo's whole-company figure, so for H shares it usually includes the A shares.
 - Prices are adjusted for splits but not dividends, the same as a default chart. A large ex-dividend day looks like a fall.
-- GitHub can start scheduled jobs late, sometimes by more than 30 minutes, and occasionally skips one.
+- GitHub can start scheduled jobs many hours late (about 10 hours on 25 and 26 November 2026) and can skip them. The extra
+  tries reduce the effect but cannot remove it. Check the date at the top of the page.
+- HKEX's [terms of use](https://www.hkex.com.hk/Global/Exchange/Terms-of-Use?sc_lang=en) restrict automated access and
+  redistribution without written permission, and this scanner downloads HKEX's list of securities. Yahoo data is unofficial.
+  Check that your use is allowed.
 
 ## Run it on your computer
 
@@ -116,7 +136,10 @@ Then open http://localhost:8791. Run the tests with `.venv/bin/python -m pytest`
 .github/workflows/scan.yml   nightly scan and publish
 scanner/config.py            every setting
 scanner/universe.py          HKEX list, market cap, sector
-scanner/prices.py            Yahoo downloads, trading calendar
+scanner/prices.py            Yahoo downloads
+scanner/market_calendar.py   holidays, latest expected session
+scanner/events.py            results-date warnings
+events.csv                   results dates you add by hand
 scanner/engine.py            indicators, factors, setups, trade plans, regime
 scanner/run.py               puts it together, writes the JSON
 site/                        the web page

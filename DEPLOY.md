@@ -39,7 +39,7 @@ Download it from https://desktop.github.com, open it, and sign in with your GitH
 Go to `https://YOURNAME.github.io/hk-momentum/`, with your GitHub username in place of YOURNAME. The exact link is also on
 **Settings > Pages**. Anyone with the link can use it.
 
-From now on it updates itself every weekday from 17:30 Hong Kong time.
+From now on it updates itself on weekday evenings. GitHub can start these runs hours late, so check the date on the page.
 
 ## If something is off
 

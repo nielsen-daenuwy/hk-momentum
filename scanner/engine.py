@@ -162,9 +162,11 @@ def plan(r, tag):
     use_swing = cfg.SWING_MIN_ATR * a <= hi - swing < cfg.STOP_ATR * a
     stop = to_tick(swing if use_swing else atr_stop, "down")
     target = to_tick(hi + cfg.TARGET_R * (hi - stop), "nearest")
+    risk_pct = round((1 - stop / hi) * 100, 1)
     return dict(entry_lo=lo, entry_hi=hi, stop=stop, target=target, hold=cfg.HOLD_DAYS[tag], note=note,
+                order="above" if lo > px else "between",   # "above": do nothing until price gets there
                 stop_basis="Swing low" if use_swing else f"{cfg.STOP_ATR:g} ATR",
-                risk_pct=round((1 - stop / hi) * 100, 1))
+                risk_pct=risk_pct, too_wide=risk_pct > cfg.MAX_RISK_PCT)
 
 
 def chips(r):

@@ -82,6 +82,15 @@ def _screen(*extra):
             return out
 
 
+def check_caps(info, previous):
+    """Reject a partial screener reply: compare with the saved copy, at today's threshold."""
+    def n(d):
+        return sum(v["mcap"] >= cfg.MIN_MARKET_CAP for v in d.values())
+    was = n(json.loads(previous.read_text())) if previous.exists() else 0
+    if len(info) < 300 or n(info) < 0.85 * was:
+        raise ValueError(f"Yahoo returned only {n(info)} market caps above the threshold (last time {was})")
+
+
 def yahoo_caps():
     info = {}
     for q in _screen():
@@ -91,8 +100,7 @@ def yahoo_caps():
         for q in _screen(Q("eq", ["sector", s])):
             if q["symbol"] in info:
                 info[q["symbol"]]["sector"] = s
-    if len(info) < 300:
-        raise ValueError(f"Yahoo returned only {len(info)} market caps")
+    check_caps(info, CACHE / "yahoo_caps.json")
     return info
 
 

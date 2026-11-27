@@ -1,8 +1,14 @@
 name: Scan and publish
 
 on:
-  schedule:
-    - cron: "30 9 * * 1-5"      # 09:30 UTC = 17:30 Hong Kong time, Monday to Friday
+  # GitHub often starts scheduled runs hours late and can drop them, so there are several tries.
+  # Each scheduled try does nothing if the published scan is already current.
+  schedule:                     # times are UTC; Hong Kong is UTC+8
+    - cron: "47 9 * * 1-5"      # 17:47 HKT
+    - cron: "13 11 * * 1-5"     # 19:13 HKT
+    - cron: "37 13 * * 1-5"     # 21:37 HKT
+    - cron: "17 15 * * 1-5"     # 23:17 HKT
+    - cron: "23 23 * * 0-4"     # 07:23 HKT next morning
   workflow_dispatch:            # adds a "Run workflow" button on the Actions tab
   push:
     branches: [main]
@@ -22,7 +28,7 @@ jobs:
     timeout-minutes: 60
     environment:
       name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
+      url: ${{ steps.deploy.outputs.page_url || steps.redeploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -36,9 +42,11 @@ jobs:
       - name: Scan
         id: scan
         continue-on-error: true
+        env:
+          ARGS: ${{ github.event_name == 'schedule' && '--if-stale' || '' }}
         run: |
           for i in 1 2 3; do
-            if python -m scanner.run; then exit 0; fi
+            if python -m scanner.run $ARGS; then exit 0; fi
             if [ "$i" -lt 3 ]; then echo "Attempt $i failed, waiting 5 minutes"; sleep 300; fi
           done
           exit 1
@@ -58,10 +66,16 @@ jobs:
         with:
           path: site
       - id: deploy
+        continue-on-error: true
+        uses: actions/deploy-pages@v5
+      - if: steps.deploy.outcome == 'failure'
+        run: sleep 90
+      - id: redeploy
+        if: steps.deploy.outcome == 'failure'
         uses: actions/deploy-pages@v5
 
       - name: Report a failed scan
         if: steps.scan.outcome == 'failure'
         run: |
-          echo "::error::The scan failed. The site is still showing the previous results."
+          echo "::error::The scan failed or is behind the latest session. See the Scan step."
           exit 1

@@ -43,18 +43,38 @@ def download(symbols):
     return got
 
 
-def index_close():
-    """Hang Seng Index closes; Tracker Fund (2800) stands in if ^HSI is unavailable."""
+def fill_recent(close, sym):
+    """Yahoo sometimes drops the latest daily index bar; rebuild it from hourly closes."""
+    try:
+        h = yf.Ticker(sym).history(period="5d", interval="1h")["Close"].dropna()
+        h.index = h.index.tz_convert(HKT).tz_localize(None).normalize()
+        return with_missing(close, h.groupby(level=0).last())
+    except Exception as e:
+        print(f"  hourly {sym}: {e!r}")
+        return close
+
+
+def with_missing(close, extra):
+    """Add days that `close` lacks; never overwrite a day it already has."""
+    return pd.concat([close, extra[~extra.index.isin(close.index)]]).sort_index()
+
+
+def index_close(need):
+    """Hang Seng Index closes that include `need`; Tracker Fund (2800) stands in if ^HSI does not."""
     for sym, label in (("^HSI", "Hang Seng Index"), ("2800.HK", "Tracker Fund 2800 (HSI proxy)")):
         for _ in range(3):
             try:
                 d = _batch([sym]).get(sym)
                 if d is not None and len(d) > cfg.HSI_MA + 10:
-                    return d["close"], label
+                    close = fill_recent(d["close"], sym)
+                    if need in close.index:
+                        return close, label
+                    print(f"  {sym}: no close for {need.date()}")
+                    break
             except Exception as e:
                 print(f"  {sym}: {e!r}")
             time.sleep(5)
-    raise RuntimeError("no Hang Seng Index data")
+    raise RuntimeError(f"no Hang Seng Index or Tracker Fund close for {need.date()}")
 
 
 def drop_unfinished(df, now=None):

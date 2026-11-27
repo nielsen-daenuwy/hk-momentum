@@ -35,16 +35,35 @@ async function load() {
   }
   return false;
 }
+// Which session should be on screen right now? Weekdays, minus holidays listed in the data.
+function freshness() {
+  const hk = new Date(Date.now() + 8 * 36e5);              // read with getUTC* = Hong Kong clock
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const closed = new Set(data.closed_days || []), [h, m] = data.eod_ready || [16, 30];
+  const open = (d) => d.getUTCDay() % 6 !== 0 && !closed.has(iso(d));
+  const back = (d) => d.setUTCDate(d.getUTCDate() - 1);
+  const d = new Date(hk);
+  if (d.getUTCHours() * 60 + d.getUTCMinutes() < h * 60 + m) back(d);
+  while (!open(d)) back(d);
+  const expected = iso(d);
+  let missing = 0;
+  for (; iso(d) > data.asof && missing < 60; back(d)) if (open(d)) missing++;
+  return { expected, missing, today: iso(hk) };
+}
+const wideStop = (s) => s.plan.risk_pct > (data.max_risk ?? 10);
+const breakAbove = (s) => (s.plan.order ?? (s.plan.entry_lo > s.close ? "above" : "between")) === "above";
 function notice(text, err) { $("notices").append(el("div", "notice" + (err ? " err" : ""), text)); }
 
 function header(status) {
   $("notices").replaceChildren();
   $("updated").textContent = `Prices as of ${day(data.asof)} close. Last updated ${hkt(data.generated_at, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })} HKT`;
-  const age = (Date.now() - new Date(data.asof + "T16:00:00+08:00")) / 864e5;
+  const f = freshness();
+  if (f.missing === 1 && f.expected === f.today)
+    notice(`Today's close has not been scanned yet. These results use the ${day(data.asof)} close.`);
+  else if (f.missing > 0)
+    notice(`OUT OF DATE: these prices are from ${day(data.asof)}. ${f.missing} newer session${f.missing === 1 ? " has" : "s have"} closed since. Do not trade from these levels.`, true);
   if (status && status.ok === false)
-    notice(`The scan on ${hkt(status.checked_at, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })} HKT failed, so this is the previous good scan (${day(data.asof)}).`);
-  else if (age > 5)
-    notice(`These prices are ${Math.floor(age)} days old. That can happen over a long holiday; otherwise the nightly scan may have stopped.`);
+    notice(`The latest run (${hkt(status.checked_at, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })} HKT) had a problem. Showing the last good scan, from ${day(data.asof)}.`);
   (data.warnings || []).forEach((w) => notice(w));
 
   const r = data.regime, box = $("regime");
@@ -74,11 +93,16 @@ function score(s) {
 function render() {
   const all = data.stocks.map((s) => ({ ...s, score: score(s) })).sort((a, b) => b.score - a.score);
   const limit = data.picks[data.regime.label] || 15;
-  const picks = all.filter((s) => s.setup).slice(0, limit).map((s, i) => ({ ...s, rank: i + 1 }));
+  const setups = all.filter((s) => s.setup);
+  const picks = setups.filter((s) => !wideStop(s)).slice(0, limit).map((s, i) => ({ ...s, rank: i + 1 }));
+  const floor = picks.length ? picks[picks.length - 1].score : 0;
+  const hidden = setups.filter((s) => wideStop(s) && (picks.length < limit || s.score >= floor));
   heat(all, picks);
   shown = sector ? picks.filter((s) => s.sector === sector) : picks;
   $("hPicks").textContent = data.regime.label === "Risk-Off" ? `Top ${picks.length} picks (reduced: Risk-Off)` : `Top ${picks.length} picks`;
-  $("pickNote").textContent = `From ${data.stocks.length} liquid stocks, ${data.stocks.filter((s) => s.setup).length} with a valid setup.` + (sector ? ` Showing ${sector} only.` : "");
+  $("pickNote").textContent = `From ${data.stocks.length} liquid stocks, ${setups.length} with a valid setup.` + (sector ? ` Showing ${sector} only.` : "");
+  $("hiddenNote").hidden = !hidden.length;
+  $("hiddenNote").textContent = `Left out, stop wider than ${data.max_risk ?? 10}%: ${hidden.map((s) => `${s.name} (${s.plan.risk_pct}%)`).join(", ")}.`;
   $("rows").replaceChildren(...shown.flatMap(row));
   const e = $("empty");
   e.hidden = shown.length > 0;
@@ -137,7 +161,9 @@ function row(s) {
   sc.append(el("b", "", s.score.toFixed(0)), bar);
   td("setup").append(el("span", "tag", s.setup));
   const c = td("n", "Close"); c.append(price(s.close), el("span", "sm " + dir(s.chg), pct(s.chg)));
-  td("n", "Entry zone").append(`${price(p.entry_lo)} – ${price(p.entry_hi)}`);
+  const order = td("n", "Order");
+  if (breakAbove(s)) order.append(`Buy above ${price(p.entry_lo)}`, el("span", "sm", `up to ${price(p.entry_hi)}`));
+  else order.append(`Buy ${price(p.entry_lo)} – ${price(p.entry_hi)}`);
   const st = td("n", "Stop"); st.append(price(p.stop), el("span", "sm", `${p.stop_basis}, −${p.risk_pct}%`));
   td("n", "Target (2R)").append(price(p.target), el("span", "sm", pct(p.target / p.entry_hi - 1)));
   td("hold", "Hold").append(p.hold);
@@ -146,6 +172,10 @@ function row(s) {
   s.chips.forEach((x) => chips.append(el("span", "chip", x)));
   s.warn.forEach((x) => chips.append(el("span", "chip w", "⚠ " + x)));
   chips.append(el("span", "small muted", p.note));
+  const news = el("a", "small news", "News ↗");
+  news.href = `https://www.tradingview.com/symbols/HKEX-${s.code}/news/`; news.target = "_blank"; news.rel = "noopener";
+  news.setAttribute("aria-label", `News for ${s.name}`);
+  chips.append(news);
   cell.append(chips); sub.append(blank, cell);
   return [tr, sub];
 }
@@ -167,13 +197,13 @@ function sliders() {
 $("reset").onclick = () => { weights = { ...data.weights }; penalty = 100; sliders(); render(); };
 
 $("csv").onclick = () => {
-  const head = ["rank", "ticker", "name", "sector", "score", "setup", "close", "change_pct", "entry_low", "entry_high", "stop", "stop_basis",
-    "target_2R", "hold", "ret5_pct", "ret10_pct", "rs20_vs_hsi_pct", "rsi14", "rel_volume", "avg_turnover_hkd", "reasons", "warnings", "prices_as_of"];
+  const head = ["rank", "ticker", "name", "sector", "score", "setup", "close", "change_pct", "order", "entry_low", "entry_high", "stop", "stop_basis",
+    "target_2R", "hold", "ret5_pct", "ret10_pct", "rs20_vs_hsi_pct", "rsi14", "rel_volume", "avg_turnover_hkd", "reasons", "warnings", "results_date", "prices_as_of"];
   const q = (v) => { let t = String(v ?? ""); if (typeof v === "string" && /^[=+\-@]/.test(t)) t = "'" + t; return /[",\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
   const n = (x, m = 1, d = 2) => x == null ? "" : +(x * m).toFixed(d);
-  const lines = shown.map((s) => [s.rank, s.tv, s.name, s.sector, n(s.score), s.setup, n(s.close, 1, 3), n(s.chg, 100), s.plan.entry_lo, s.plan.entry_hi,
+  const lines = shown.map((s) => [s.rank, s.tv, s.name, s.sector, n(s.score), s.setup, n(s.close, 1, 3), n(s.chg, 100), breakAbove(s) ? "buy above" : "buy between", s.plan.entry_lo, s.plan.entry_hi,
     s.plan.stop, s.plan.stop_basis, s.plan.target, s.plan.hold, n(s.ret5, 100), n(s.ret10, 100), n(s.rs20, 100), n(s.rsi), n(s.rvol),
-    s.turnover, s.chips.join("; "), s.warn.join("; "), data.asof].map(q).join(","));
+    s.turnover, s.chips.join("; "), s.warn.join("; "), s.results ?? "", data.asof].map(q).join(","));
   const url = URL.createObjectURL(new Blob(["﻿" + [head.join(","), ...lines].join("\r\n")], { type: "text/csv" }));
   const a = el("a"); a.href = url; a.download = `hk-momentum-${data.asof}.csv`; document.body.append(a); a.click(); a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 2000);

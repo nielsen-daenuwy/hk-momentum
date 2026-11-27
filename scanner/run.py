@@ -1,20 +1,24 @@
 """Run one scan:  python -m scanner.run
 
 Success -> writes site/data/latest.json.  Failure -> latest.json is left alone, so the site keeps
-showing the last good scan, and site/data/status.json records what went wrong."""
+showing the last good scan, and site/data/status.json records what went wrong.  A run that gets
+newer prices than are published, but not the latest session, publishes them AND reports failure.
+
+--if-stale : do nothing if the published scan already covers the latest session (scheduled runs)."""
+import hashlib
 import json
 import math
 import os
 import sys
 import traceback
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from . import config as cfg, engine as en, prices, universe
+from . import config as cfg, engine as en, events, market_calendar as mc, prices, universe
 
 DATA = Path(__file__).resolve().parent.parent / "site" / "data"
 
@@ -41,18 +45,37 @@ def write(path, obj):
     os.replace(tmp, path)
 
 
-def scan(uni, n_listed, bars, hsi, hsi_label, warnings):
+def rules_id():
+    """Changes whenever config.py does, so a settings change is always re-published."""
+    return hashlib.sha1(Path(cfg.__file__).read_bytes()).hexdigest()[:8]
+
+
+def check_replace(old, new):
+    """Refuse to overwrite published results with older or noticeably thinner ones."""
+    if not old:
+        return
+    if old["asof"] > new["asof"]:
+        raise RuntimeError(f"new data ({new['asof']}) is older than what is already published")
+    if old["asof"] == new["asof"] and new["coverage"] < old.get("coverage", 0) - 0.03:
+        raise RuntimeError(f"new download covers {new['coverage']:.0%} of stocks, the published one "
+                           f"{old['coverage']:.0%}; keeping the published one")
+
+
+def scan(uni, n_listed, bars, hsi, hsi_label, warnings, closed=frozenset()):
     """All inputs are already downloaded -> the JSON payload."""
     if len(bars) < cfg.MIN_COVERAGE * len(uni):
         raise RuntimeError(f"only {len(bars)} of {len(uni)} stocks downloaded")
     vol = pd.DataFrame({s: d["volume"] for s, d in bars.items()})
     days = prices.sessions(vol)
     asof = days[-1]
-    stale = (asof - hsi.index.max()).days
-    if stale > 4:
-        raise RuntimeError(f"HSI data is {stale} days behind the stock data")
     if asof not in hsi.index:
-        warnings.append(f"no index close for {asof.date()}; previous close used")
+        raise RuntimeError(f"no index close for {asof.date()}")
+    gaps = [d.date() for d in pd.bdate_range(days[-cfg.TRADED_SESSIONS], asof)
+            if mc.is_session(d.date(), closed) and d not in days]
+    if gaps:
+        warnings.append("no usable prices for " + ", ".join(f"{d.day} {d:%b}" for d in gaps)
+                        + "; calculations skip those days")
+    coverage = float((vol.loc[asof] > 0).sum() / len(uni))
     hsi = hsi[hsi.index <= asof].reindex(days).ffill().dropna()
 
     fails, rows = Counter(), {}
@@ -101,37 +124,61 @@ def scan(uni, n_listed, bars, hsi, hsi_label, warnings):
               ["Price history downloaded", have_px],
               ["Passed the liquidity filter", len(stocks)],
               ["Showing a setup", sum(1 for s in stocks if s["setup"])]]
+    near = (str(asof.date() - timedelta(days=30)), str(asof.date() + timedelta(days=400)))
     return dict(asof=str(asof.date()), generated_at=datetime.now(prices.HKT).isoformat(timespec="seconds"),
+                rules=rules_id(), coverage=coverage, max_risk=cfg.MAX_RISK_PCT, event_window=cfg.EVENT_WINDOW,
+                eod_ready=list(cfg.EOD_READY), closed_days=sorted(d for d in closed if near[0] <= d <= near[1]),
                 regime=reg, funnel=funnel, rejected=dict(fails), weights=cfg.WEIGHTS, labels=cfg.LABELS,
                 picks=cfg.PICKS, breadth_rules=[cfg.BREADTH_ON, cfg.BREADTH_OFF], hsi_ma_days=cfg.HSI_MA,
                 warnings=warnings, stocks=stocks)
 
 
-def main():
-    now = datetime.now(prices.HKT).isoformat(timespec="seconds")
+def main(argv=()):
+    clock = datetime.now(prices.HKT)
+    now = clock.isoformat(timespec="seconds")
     try:
         warnings = []
+        closed = mc.closed_days(warnings)
+        expected = mc.expected_session(clock, closed).isoformat()
+        latest = DATA / "latest.json"
+        old = json.loads(latest.read_text()) if latest.exists() else None
+        same_rules = bool(old) and old.get("rules") == rules_id()
+        if "--if-stale" in argv and same_rules and old["asof"] >= expected:
+            print(f"already current: published {old['asof']}, latest session {expected}")
+            return
         uni, n = universe.build(warnings)
         print(f"{n} Main Board equities, {len(uni)} with market cap >= {cfg.MIN_MARKET_CAP / 1e9:g}bn")
         bars = {s: prices.drop_unfinished(d) for s, d in prices.download(list(uni.index)).items()}
         bars = {s: d for s, d in bars.items() if len(d)}
-        hsi, label = prices.index_close()
-        out = scan(uni, n, bars, prices.drop_unfinished(hsi), label, warnings)
-        old = DATA / "latest.json"
-        if old.exists() and json.loads(old.read_text())["asof"] > out["asof"]:
-            raise RuntimeError(f"new data ({out['asof']}) is older than what is already published")
-        write(old, out)
-        msg = "ok" if out["asof"] == now[:10] else f"No new session; latest trading day is {out['asof']}"
-        write(DATA / "status.json", dict(ok=True, checked_at=now, message=msg))
-        print(f"{out['asof']}: {out['regime']['label']}, funnel {out['funnel']}, rejected {out['rejected']}")
-        for s in [s for s in out["stocks"] if s["setup"]][:cfg.PICKS[out["regime"]["label"]]]:
-            print(f"  {s['tv']:<11}{s['name']:<18}{s['score']:>6.1f}  {s['setup']:<20} {s['plan']['entry_lo']}-"
-                  f"{s['plan']['entry_hi']} stop {s['plan']['stop']} target {s['plan']['target']} {s['chips']} {s['warn']}")
+        days = prices.sessions(pd.DataFrame({s: d["volume"] for s, d in bars.items()}))
+        hsi, label = prices.index_close(days[-1])
+        out = scan(uni, n, bars, prices.drop_unfinished(hsi), label, warnings, closed)
+        behind = out["asof"] < expected
+        # Behind and nothing newer than what is up: leave the published file (and its timestamp) alone.
+        if not (behind and same_rules and out["asof"] <= old["asof"]):
+            events.attach(out, closed, warnings)
+            check_replace(old, out)
+            write(latest, out)
+            report(out)
+        if behind:
+            raise RuntimeError(f"prices only reach {out['asof']} but the {expected} session has closed")
+        write(DATA / "status.json", dict(ok=True, checked_at=now, expected=expected, message="ok"))
     except Exception as e:
         traceback.print_exc()
         write(DATA / "status.json", dict(ok=False, checked_at=now, message=str(e)[:300]))
         sys.exit(1)
 
 
+def report(out):
+    print(f"{out['asof']}: {out['regime']['label']}, funnel {out['funnel']}, rejected {out['rejected']}")
+    setups = [s for s in out["stocks"] if s["setup"]]
+    wide = [s["name"] for s in setups if s["plan"]["too_wide"]]
+    print(f"stop wider than {cfg.MAX_RISK_PCT:g}%: {len(wide)} setups not shown {wide[:8]}")
+    for s in [s for s in setups if not s["plan"]["too_wide"]][:cfg.PICKS[out["regime"]["label"]]]:
+        p = s["plan"]
+        print(f"  {s['tv']:<11}{s['name']:<18}{s['score']:>6.1f}  {s['setup']:<20} {p['order']:<8}{p['entry_lo']}-"
+              f"{p['entry_hi']} stop {p['stop']} ({p['risk_pct']}%) {s['warn']}")
+
+
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1:])
